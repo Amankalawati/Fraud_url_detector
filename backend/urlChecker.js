@@ -1,19 +1,60 @@
 const axios = require("axios");
 
 // -----------------------------------
+// 0. TYPOSQUATTING DETECTOR
+// -----------------------------------
+function detectTyposquatting(domain) {
+  const suspiciousPatterns = [
+    /\d+[a-z]+/i,                          // letters + numbers
+    /--/,                                  // double hyphen
+    /(paypa1|faceb00k|amaz0n|g00gle)/i,    // fake lookalikes
+    /\.ru$|\.cn$|\.ml$|\.tk$|\.gq$|\.cf$|\.xyz$/i,  
+    /^xn--/i,                              // punycode
+    /(secure|login|verify|update)[-]/i,
+    /[-](security|verify|auth)$/i,
+    /([a-z])\1{2,}/i                       // repeated letters
+  ];
+
+  const homoglyphs = /[а-яєіїѵӏοѕ]/i;
+
+  if (homoglyphs.test(domain)) return true;
+
+  return suspiciousPatterns.some(pattern => pattern.test(domain));
+}
+
+
+
+// -----------------------------------
+// STEP 4: HTTPS VALIDATION
+// -----------------------------------
+function checkHttps(url) {
+  try {
+    return url.startsWith("https://");
+  } catch {
+    return false;
+  }
+}
+
+
+
+// -----------------------------------
+// STEP 5: IP-BASED URL DETECTOR
+// -----------------------------------
+function isIpBased(url) {
+  return /https?:\/\/\d{1,3}(\.\d{1,3}){3}/.test(url);
+}
+
+
+
+// -----------------------------------
 // 1. PHISHARK CHECKER
 // -----------------------------------
 async function checkPhiShark(url, privateMode = false) {
   try {
     const res = await axios.post(
       "https://phishark.net/api/check-url",
-      {
-        url: url,
-        private_mode: privateMode
-      },
-      {
-        headers: { "Content-Type": "application/json" }
-      }
+      { url, private_mode: privateMode },
+      { headers: { "Content-Type": "application/json" } }
     );
 
     return {
@@ -23,11 +64,11 @@ async function checkPhiShark(url, privateMode = false) {
       error: false
     };
 
-  } catch (err) {
-    console.error("PhiShark Error:", err.message);
+  } catch {
     return { source: "PhiShark", probability: null, error: true };
   }
 }
+
 
 
 // -----------------------------------
@@ -35,7 +76,6 @@ async function checkPhiShark(url, privateMode = false) {
 // -----------------------------------
 async function checkURLert(url) {
   try {
-    // STEP 1 → Submit scan request
     const scanStart = await axios.post(
       "https://api.urlert.com/v1/scans",
       { url },
@@ -49,12 +89,11 @@ async function checkURLert(url) {
 
     const scan_id = scanStart.data.scan_id;
 
-    // STEP 2 → Poll status until completed
     let status = "pending";
     let result = null;
 
     while (status === "pending") {
-      await new Promise(r => setTimeout(r, 2000)); // wait 2 sec
+      await new Promise(r => setTimeout(r, 2000));
 
       const scanStatus = await axios.get(
         `https://api.urlert.com/v1/scans/${scan_id}`,
@@ -69,9 +108,8 @@ async function checkURLert(url) {
       result = scanStatus.data;
     }
 
-    // URLert does NOT give a direct probability → create basic score
     let score = 0;
-    if (result.is_phishing) score = 1.0;
+    if (result.is_phishing) score = 1;
     else if (result.suspicious) score = 0.7;
 
     return {
@@ -81,43 +119,154 @@ async function checkURLert(url) {
       error: false
     };
 
-  } catch (err) {
-    console.error("URLert Error:", err.message);
+  } catch {
     return { source: "URLert", probability: null, error: true };
   }
 }
 
 
+
 // -----------------------------------
-// 3. COMBINED VERDICT ENGINE
+// 3. WHOISFREAK PARSER
+// -----------------------------------
+async function checkDomainAge(domain) {
+  try {
+    const res = await axios.get(
+      `https://api.whoisfreaks.com/v1.0/whois?apiKey=582312dcb1bd4d0ab09417a6fc0dda45&whois=live&domainName=${domain}`
+    );
+
+    const data = res.data;
+
+    const creationDateString = data?.create_date || null;
+
+    if (!creationDateString) {
+      return {
+        source: "WhoisFreak",
+        domainAgeDays: null,
+        creationDate: null,
+        raw: data,
+        error: false
+      };
+    }
+
+    const createdDate = new Date(creationDateString);
+
+    if (isNaN(createdDate.getTime())) {
+      return {
+        source: "WhoisFreak",
+        domainAgeDays: null,
+        creationDate: null,
+        raw: data,
+        error: false
+      };
+    }
+
+    const diffDays = Math.floor(
+      (Date.now() - createdDate.getTime()) / (1000 * 60 * 60 * 24)
+    );
+
+    return {
+      source: "WhoisFreak",
+      domainAgeDays: diffDays,
+      creationDate: createdDate,
+      raw: data,
+      error: false
+    };
+
+  } catch {
+    return { source: "WhoisFreak", domainAgeDays: null, error: true };
+  }
+}
+
+
+
+// -----------------------------------
+// DOMAIN EXTRACTOR
+// -----------------------------------
+function extractDomain(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
+}
+
+
+
+// -----------------------------------
+// FINAL VERDICT ENGINE (updated)
 // -----------------------------------
 async function checkURL(url) {
+  const domain = extractDomain(url);
+
   const results = await Promise.all([
     checkPhiShark(url),
-    checkURLert(url)
+    checkURLert(url),
+    checkDomainAge(domain)
   ]);
 
   const phiScore = results[0].probability ?? 0;
   const urlertScore = results[1].probability ?? 0;
 
-  const finalScore = (phiScore + urlertScore) / 2;
+  // ------------ Domain Age Scoring ------------
+  let domainAgeScore = 0;
+  const age = results[2].domainAgeDays;
+
+  if (age !== null) {
+    if (age < 90) domainAgeScore = 0.8;
+    else if (age < 250) domainAgeScore = 0.4;
+  }
+
+  // ------------ Typosquatting Score ------------
+  const typoDetected = detectTyposquatting(domain);
+  const typoScore = typoDetected ? 0.7 : 0;
+
+  // ------------ HTTPS Score ------------
+  const httpsOK = checkHttps(url);
+  const httpsScore = httpsOK ? 0 : 0.6; // HTTP = risky
+
+  // ------------ IP URL Score ------------
+  const ipBased = isIpBased(url);
+  const ipScore = ipBased ? 1 : 0; // IP URLs = Very suspicious
+
+
+
+  // -----------------------------------
+  // FINAL SCORE (Weights Updated)
+  // -----------------------------------
+  const finalScore =
+    (phiScore * 0.35) +
+    (urlertScore * 0.35) +
+    (domainAgeScore * 0.10) +
+    (typoScore * 0.10) +
+    (httpsScore * 0.05) +
+    (ipScore * 0.05);
+
 
   let verdict = "SAFE";
-
-  if (finalScore > 0.8) verdict = "VERY DANGEROUS";
-  else if (finalScore > 0.6) verdict = "DANGEROUS";
-  else if (finalScore > 0.4) verdict = "SUSPICIOUS";
+  if (finalScore > 0.85) verdict = "VERY DANGEROUS";
+  else if (finalScore > 0.60) verdict = "DANGEROUS";
+  else if (finalScore > 0.40) verdict = "SUSPICIOUS";
 
   return {
     url,
-    finalScore,
+    domain,
+    finalScore: Number(finalScore.toFixed(2)),
     verdict,
-    details: results
+    typosquatting: typoDetected,
+    https: httpsOK,
+    ipBased,
+    details: {
+      phiShark: results[0],
+      urlert: results[1],
+      domain: results[2]
+    }
   };
 }
 
 
+
 // -----------------------------------
-// 4. RUN
+// TEST
 // -----------------------------------
-checkURL("http://mavenox.com").then(console.log);
+checkURL("https://www.brandbasecapsule.com").then(console.log);
