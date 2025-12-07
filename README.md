@@ -1,6 +1,8 @@
 # SentinelCore
 
-
+## Demo video
+ https://drive.google.com/file/d/1Js30LI9VjQTysXsNegeUm6Caj0TtDec_/view?usp=drivesdk
+ 
 ## 📝 Description
 
 A Real-Time Security Tool to Detect Phishing URLs & Website-Linked QR Codes
