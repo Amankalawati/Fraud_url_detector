@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 
+
 // Backend API URL
-const API_BASE_URL = 'http://localhost:3000';
+const API_BASE_URL = 'https://fraud-url-detector-1-backend.onrender.com';
 
 const Dashboard = () => {
   const [url, setUrl] = useState('');
